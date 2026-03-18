@@ -23,7 +23,8 @@ R1: float = None  # r1/r_star
 cw_dict: dict = None  # 无粘外形参数，字典
 N: int = None  # 总离散点数
 Tw: float = 300.0  # K
-alpha: float = 0.0  # 边界层温度型因子，Eq.62。对结果影响较大
+# 边界层温度型因子，Eq.62。对结果影响较大。不建议为0，对于喉部的高静温而言，会导致H为负值
+alpha: float = 1.0
 gama: float = 1.4
 Pr: float = 0.72
 criterion_Re_theta = 0.001  # 迭代计算Re_theta时，相邻两次Re_theta相对误差的准则
@@ -86,8 +87,58 @@ def load_variables():
     cw_dict["delta_a_star"] = np.zeros((N,))
     cw_dict["boundary_correction"] = np.zeros((N,))
 
+    cw_dict["iter"] = np.zeros((N,))
 
-def H_Cf(n, iter):
+
+def cal_H(n):
+    H = (
+        -1
+        + Tw * (cw_dict["H_i"][n] + 1) / cw_dict["T_s"][n]
+        + alpha * (cw_dict["T_aw"][n] - Tw) / cw_dict["T_s"][n]
+    )
+    return H
+
+
+def cal_Hi(n):
+    H_i = (1 - 7 * (cw_dict["C_fi"][n] / 2) ** 0.5) ** (-1)
+    return H_i
+
+
+def cal_Cf(n):
+    C_f = cw_dict["T_s"][n] / cw_dict["T_ref"][n] * cw_dict["C_fi"][n]
+    return C_f
+
+
+def cal_Cfi(n):
+    C_fi = 0.0773 / (
+        (math.log10(cw_dict["Re_theta_i"][n].item()) + 4.563)
+        * (math.log10(cw_dict["Re_theta_i"][n].item()) - 0.546)
+    )
+    return C_fi
+
+
+def cal_Re_theta_i(n):
+    Re_theta_i = (
+        Tw
+        * cw_dict["miu_e"][n]
+        * cw_dict["Re_theta"][n]
+        / cw_dict["T_ref"][n]
+        / cw_dict["miu_w"][n]
+    )
+    return Re_theta_i
+
+
+def cal_Re_theta(n):
+    Re_theta = (
+        cw_dict["rho_s"][n]
+        * cw_dict["V"][n]
+        * cw_dict["theta"][n]
+        / cw_dict["miu_e"][n]
+    )
+    return Re_theta
+
+
+def update_H_Cf(n, iter):
     """
     计算当前位点n的H和Cf
     params:
@@ -104,72 +155,46 @@ def H_Cf(n, iter):
     # 第一次迭代
     if iter == 0:
         # 用上一个station的值来赋初值
-        cw_dict["Re_theta"][n] = cw_dict["Re_theta"][n - 1] if n > 0 else 1e5
+        cw_dict["Re_theta"][n] = cw_dict["Re_theta"][n - 1] if n > 0 else 1e3
         if n == 2:
             cw_dict["Re_theta"][n] = cw_dict["Re_theta"][0]
             # 不用n=1是因为此时还未求解2
 
-        cw_dict["Re_theta_i"][n] = (
-            Tw
-            * cw_dict["miu_e"][n]
-            * cw_dict["Re_theta"][n]
-            / cw_dict["T_ref"][n]
-            / cw_dict["miu_w"][n]
-        )
+        cw_dict["Re_theta_i"][n] = cal_Re_theta_i(n)
 
-        cw_dict["C_fi"][n] = (
-            0.0773
-            / (math.log10(cw_dict["Re_theta_i"][n].item()) + 4.563)
-            * (math.log10(cw_dict["Re_theta_i"][n].item()) - 0.546)
-        )
-        cw_dict["C_f"][n] = cw_dict["T_s"][n] / cw_dict["T_ref"][n] * cw_dict["C_fi"][n]
+        cw_dict["C_fi"][n] = cal_Cfi(n)
+        cw_dict["C_f"][n] = cal_Cf(n)
 
-        cw_dict["H_i"][n] = (1 - 7 * (cw_dict["C_fi"][n] / 2) ** 0.5) ** (-1)
-        cw_dict["H"][n] = (
-            -1
-            + Tw * (cw_dict["H_i"][n] + 1) / cw_dict["T_s"][n]
-            + alpha * (cw_dict["T_aw"][n] - Tw) / cw_dict["T_s"][n]
-        )
+        cw_dict["H_i"][n] = cal_Hi(n)
+        cw_dict["H"][n] = cal_H(n)
+        # # =============
+        # if cw_dict["H"][n] <= 0 and n == 0:
+        #     cw_dict["H"][n] = 0.3
+        # # ----------------
         return iter
 
     if iter > 0:
-        temp_Re_theta = (
-            cw_dict["rho_s"][n]
-            * cw_dict["V"][n]
-            * cw_dict["theta"][n]
-            / cw_dict["miu_e"][n]
-        )
+        temp_Re_theta = cal_Re_theta(n)
 
         if (
             abs(temp_Re_theta - cw_dict["Re_theta"][n]) / cw_dict["Re_theta"][n]
             <= criterion_Re_theta
         ):
             cw_dict["Re_theta"][n] = temp_Re_theta
+            cw_dict["iter"][n] = iter
             iter = -1
             return iter
         else:
             cw_dict["Re_theta"][n] = temp_Re_theta
-            cw_dict["Re_theta_i"][n] = (
-                Tw
-                * cw_dict["miu_e"][n]
-                * cw_dict["Re_theta"][n]
-                / cw_dict["T_ref"][n]
-                / cw_dict["miu_w"][n]
-            )
-            cw_dict["C_fi"][n] = (
-                0.0773
-                / (math.log10(cw_dict["Re_theta_i"][n].item()) + 4.563)
-                * (math.log10(cw_dict["Re_theta_i"][n].item()) - 0.546)
-            )
-            cw_dict["C_f"][n] = (
-                cw_dict["T_s"][n] / cw_dict["T_ref"][n] * cw_dict["C_fi"][n]
-            )
-            cw_dict["H_i"][n] = (1 - 7 * (cw_dict["C_fi"][n] / 2) ** 0.5) ** (-1)
-            cw_dict["H"][n] = (
-                -1
-                + Tw * (cw_dict["H_i"][n] + 1) / cw_dict["T_s"][n]
-                + alpha * (cw_dict["T_aw"][n] - Tw) / cw_dict["T_s"][n]
-            )
+            cw_dict["Re_theta_i"][n] = cal_Re_theta_i(n)
+            cw_dict["C_fi"][n] = cal_Cfi(n)
+            cw_dict["C_f"][n] = cal_Cf(n)
+            cw_dict["H_i"][n] = cal_Hi(n)
+            cw_dict["H"][n] = cal_H(n)
+            # # ==============
+            # if cw_dict["H"][n] <= 0 and n == 0:
+            #     cw_dict["H"][n] = 0.3
+            # # ============
 
             return iter
 
@@ -204,7 +229,7 @@ def n0(delta_a_star):
     )
 
     for iter in range(10000):
-        iter = H_Cf(n, iter)  # 更新{Re_theta, Re_theta_i, C_fi, C_f, Hi, H}
+        iter = update_H_Cf(n, iter)  # 更新{Re_theta, Re_theta_i, C_fi, C_f, Hi, H}
         if iter == -1:
             break
         cw_dict["theta"][0] = delta_star / cw_dict["H"][0]
@@ -213,7 +238,7 @@ def n0(delta_a_star):
         # # print(np.array(list(cw_dict.values()))[:, 0])
         # for key, item in zip(cw_dict.keys(), np.asarray(list(cw_dict.values()))[:, 0]):
         #     print(f"{key}: {item}")
-    cw_dict["P"][0] = 2 + cw_dict["H"][0] - cw_dict["Ma"][0] ** 2 * dW_dx_0 / W_0
+    cw_dict["P"][0] = (2 + cw_dict["H"][0] - cw_dict["Ma"][0] ** 2) * dW_dx_0 / W_0
     cw_dict["Q"][0] = cw_dict["theta"][0] * cw_dict["P"][0]
     cw_dict["theta_deri"][0] = 0  # 人工指定
 
@@ -227,7 +252,7 @@ def n1n2():
     n = 2
 
     for iter in range(10000):
-        iter = H_Cf(n, iter)  # 更新{Re_theta, Re_theta_i, C_fi, C_f, Hi, H}
+        iter = update_H_Cf(n, iter)  # 更新{Re_theta, Re_theta_i, C_fi, C_f, Hi, H}
         if iter == -1:
             break
 
@@ -281,31 +306,12 @@ def n1n2():
         + cw_dict["theta"][0]
     )
     cw_dict["theta_deri"][n] = s * cw_dict["theta_deri"][2] / (s + t)
-    cw_dict["Re_theta"][n] = (
-        cw_dict["rho_s"][n]
-        * cw_dict["V"][n]
-        * cw_dict["theta"][n]
-        / cw_dict["miu_e"][n]
-    )
-    cw_dict["Re_theta_i"][n] = (
-        Tw
-        * cw_dict["miu_e"][n]
-        * cw_dict["Re_theta"][n]
-        / cw_dict["T_ref"][n]
-        / cw_dict["miu_w"][n]
-    )
-    cw_dict["C_fi"][n] = (
-        0.0773
-        / (math.log10(cw_dict["Re_theta_i"][n].item()) + 4.563)
-        * (math.log10(cw_dict["Re_theta_i"][n].item()) - 0.546)
-    )
-    cw_dict["C_f"][n] = cw_dict["T_s"][n] / cw_dict["T_ref"][n] * cw_dict["C_fi"][n]
-    cw_dict["H_i"][n] = (1 - 7 * (cw_dict["C_fi"][n] / 2) ** 0.5) ** (-1)
-    cw_dict["H"][n] = (
-        -1
-        + Tw * (cw_dict["H_i"][n] + 1) / cw_dict["T_s"][n]
-        + alpha * (cw_dict["T_aw"][n] - Tw) / cw_dict["T_s"][n]
-    )
+    cw_dict["Re_theta"][n] = cal_Re_theta(n)
+    cw_dict["Re_theta_i"][n] = cal_Re_theta_i(n)
+    cw_dict["C_fi"][n] = cal_Cfi(n)
+    cw_dict["C_f"][n] = cal_Cf(n)
+    cw_dict["H_i"][n] = cal_Hi(n)
+    cw_dict["H"][n] = cal_H(n)
 
     print(f"n={1}, theta = {cw_dict["theta"][1]}")
     print(f"n={2}, theta = {cw_dict["theta"][2]}")
@@ -322,51 +328,53 @@ def solve_momentum_eq():
     global cw_dict
 
     for n in range(3, N):
+        s = cw_dict["x"][n - 1] - cw_dict["x"][n - 2]
+        t = cw_dict["x"][n] - cw_dict["x"][n - 1]
+
+        Gn_2 = (2 * s - t) * (s + t) / 6 / s
+        Gn_1 = (s + t) ** 3 / 6 / s / t
+        Gn = (2 * t - s) * (s + t) / 6 / t
+
+        P_n2 = cw_dict["Ma"][n] * (1 + (gama - 1) / 2 * cw_dict["Ma"][n] ** 2)
+        # dM/dx，向后差分格式
+        P_n3 = (
+            t**2 * cw_dict["Ma"][n - 2]
+            - (s + t) ** 2 * cw_dict["Ma"][n - 1]
+            + (s + 2 * t) * s * cw_dict["Ma"][n]
+        ) / (s * (s + t) * t)
+        # 1/y*dy/dx，向后差分格式
+        P_n4 = (
+            1
+            / cw_dict["y"][n]
+            * (
+                t**2 * cw_dict["y"][n - 2]
+                - (s + t) ** 2 * cw_dict["y"][n - 1]
+                + (s + 2 * t) * s * cw_dict["y"][n]
+            )
+            / (s * (s + t) * t)
+        )
+
         for iter in range(10000):
-            iter = H_Cf(n, iter)  # 更新{Re_theta, Re_theta_i, C_fi, C_f, Hi, H}
+            iter = update_H_Cf(n, iter)  # 更新{Re_theta, Re_theta_i, C_fi, C_f, Hi, H}
             if iter == -1:
                 print(f"n={n}, theta = {cw_dict["theta"][n]}")
                 break
 
-            s = cw_dict["x"][n - 1] - cw_dict["x"][n - 2]
-            t = cw_dict["x"][n] - cw_dict["x"][n - 1]
-
             P_n1 = 2 - cw_dict["Ma"][n] ** 2 + cw_dict["H"][n]
-            P_n2 = cw_dict["Ma"][n] * (1 + (gama - 1) / 2 * cw_dict["Ma"][n] ** 2)
 
-            P_n3 = (
-                t**2 * cw_dict["Ma"][n - 2]
-                - (s + t) ** 2 * cw_dict["Ma"][n - 1]
-                + (s + 2 * t) * s * cw_dict["Ma"][n]
-            ) / (
-                s * (s + t) * t
-            )  # dM/dx，向后差分格式
-            P_n4 = (
-                1
-                / cw_dict["y"][n]
-                * (
-                    t**2 * cw_dict["y"][n - 2]
-                    - (s + t) ** 2 * cw_dict["y"][n - 1]
-                    + (s + 2 * t) * s * cw_dict["y"][n]
-                )
-                / (s * (s + t) * t)
-            )  # dy/dx，向后差分格式
             cw_dict["P"][n] = P_n1 / P_n2 * P_n3 + P_n4
 
             cw_dict["Q"][n] = (
                 cw_dict["C_f"][n] / 2 / math.cos(math.radians(cw_dict["phi"][n].item()))
             )
 
-            Gn_2 = (2 * s - t) * (s + t) / 6 / s
-            Gn_1 = (s + t) ** 3 / 6 / s / t
-            Gn = (2 * t - s) * (s + t) / 6 / t
-
             cw_dict["theta"][n] = (
                 cw_dict["theta"][n - 2]
                 + Gn_2 * cw_dict["theta_deri"][n - 2]
                 + Gn_1 * cw_dict["theta_deri"][n - 1]
                 + Gn * cw_dict["Q"][n]
-            ) / (1 + cw_dict["Q"][n] * cw_dict["P"][n])
+                # ) / (1 + cw_dict["Q"][n] * cw_dict["P"][n])
+            ) / (1 + Gn * cw_dict["P"][n])
 
             cw_dict["theta_deri"][n] = (
                 cw_dict["Q"][n] - cw_dict["P"][n] * cw_dict["theta"][n]
@@ -396,19 +404,20 @@ def cal_boundary_correction():
     )
 
 
-# def over_plot():
-#     from matplotlib import pyplot as plt
+def over_plot():
+    from matplotlib import pyplot as plt
 
-#     plt.figure()
-#     plt.plot(cw_dict["x"], cw_dict["y"])
-#     plt.plot(
-#         cw_dict["x"],
-#         cw_dict["y"] - cw_dict["boundary_correction"],
-#         linestyle="--",
-#         color="red",
-#     )
-#     plt.axis("equal")
-#     plt.show()
+    plt.figure()
+    plt.plot(cw_dict["x"], cw_dict["y"])
+    plt.plot(
+        cw_dict["x"],
+        cw_dict["y"] - cw_dict["boundary_correction"],
+        linestyle="--",
+        color="red",
+    )
+    plt.axis("equal")
+    plt.ylim(0)
+    plt.show()
 
 
 def main():
@@ -422,7 +431,7 @@ def main():
 
     cal_boundary_correction()
 
-    # over_plot()
+    over_plot()
 
 
 if __name__ == "__main__":
