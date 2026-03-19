@@ -5,11 +5,6 @@ import thermo_paras_functions
 import math
 
 
-# import warnings
-# from runtimeout import warn_with_breakpoint
-
-# warnings.showwarning = warn_with_breakpoint
-
 # 从pkl文件读取后，会使用到的参数
 contour_wall: np.ndarray = None  # 无粘外形参数
 Pt: float = None  # 总压 # unit Pa
@@ -23,10 +18,10 @@ R1: float = None  # r1/r_star
 cw_dict: dict = None  # 无粘外形参数，字典
 N: int = None  # 总离散点数
 Tw: float = 300.0  # K
-# 边界层温度型因子，Eq.62。对结果影响较大。不建议为0，对于喉部的高静温而言，会导致H为负值
+# alpha 边界层温度型因子，Eq.62。对结果影响较大。不建议为0，对于喉部的高静温而言，会导致H为负值
 alpha: float = 1.0
-gama: float = 1.4
-Pr: float = 0.72
+gama: float = 1.4  # 比热比
+Pr: float = 0.72  # 普朗特数
 criterion_Re_theta = 0.001  # 迭代计算Re_theta时，相邻两次Re_theta相对误差的准则
 
 delta_a_throat = 3e-4  # 指定喉部(n=1)的轴对称边界层位移厚度; unit m
@@ -62,7 +57,7 @@ def load_variables():
         thermo_paras_functions.cal_T_ref(Tw, taw, te)
         for taw, te in zip(T_aw, cw_dict["T_s"])
     ]
-    p_s = [thermo_paras_functions.cal_Ps(W, Pt) for W in cw_dict["W"]]
+    p_s = [thermo_paras_functions.cal_Ps(W, Pt) for W in cw_dict["W"]]  # 静压
 
     cw_dict["miu_e"] = np.asarray(miu_e)
     cw_dict["miu_w"] = miu_w
@@ -87,10 +82,15 @@ def load_variables():
     cw_dict["delta_a_star"] = np.zeros((N,))
     cw_dict["boundary_correction"] = np.zeros((N,))
 
-    cw_dict["iter"] = np.zeros((N,))
+    cw_dict["iter"] = np.zeros((N,))  # 记录各点迭代次数
 
 
 def cal_H(n):
+    """
+    Result:
+    ---------------
+    形状因子，Eq.68
+    """
     H = (
         -1
         + Tw * (cw_dict["H_i"][n] + 1) / cw_dict["T_s"][n]
@@ -100,16 +100,31 @@ def cal_H(n):
 
 
 def cal_Hi(n):
+    """
+    Result:
+    --------------
+    不可压缩形状因子 Eq.72
+    """
     H_i = (1 - 7 * (cw_dict["C_fi"][n] / 2) ** 0.5) ** (-1)
     return H_i
 
 
 def cal_Cf(n):
+    """
+    Result:
+    -------------
+    摩擦系数，Eq.70
+    """
     C_f = cw_dict["T_s"][n] / cw_dict["T_ref"][n] * cw_dict["C_fi"][n]
     return C_f
 
 
 def cal_Cfi(n):
+    """
+    Result:
+    ---------------
+    不可压摩擦因子，Eq.70
+    """
     C_fi = 0.0773 / (
         (math.log10(cw_dict["Re_theta_i"][n].item()) + 4.563)
         * (math.log10(cw_dict["Re_theta_i"][n].item()) - 0.546)
@@ -118,6 +133,11 @@ def cal_Cfi(n):
 
 
 def cal_Re_theta_i(n):
+    """
+    Result:
+    ---------------
+    计算基于动量厚度的不可压雷诺数，Eq.71
+    """
     Re_theta_i = (
         Tw
         * cw_dict["miu_e"][n]
@@ -129,6 +149,11 @@ def cal_Re_theta_i(n):
 
 
 def cal_Re_theta(n):
+    """
+    Result:
+    --------------
+    计算基于动量厚度的雷诺数，Re = rho_e * u_e * theta / miu_e
+    """
     Re_theta = (
         cw_dict["rho_s"][n]
         * cw_dict["V"][n]
@@ -140,22 +165,25 @@ def cal_Re_theta(n):
 
 def update_H_Cf(n, iter):
     """
-    计算当前位点n的H和Cf
+    1. iter = 0 初始化Re_theta, 依次初始化Re_theta_i, C_fi, Cf, H_i, H
+    2. iter > 0 根据最新计算的theta，更新当前位点n的Re_theta_i, C_fi, Cf, H_i, H
     params:
     ----------------
         n：当前位点的index，n=(0,1,2,3...N)
         iter: 迭代次数
 
     result:
-    -------------
+    ----------------
     更新cw_dict的{Re_theta, Re_theta_i, C_fi, C_f, Hi, H}
     """
     global cw_dict
 
-    # 第一次迭代
+    # 点n的第一次迭代
     if iter == 0:
         # 用上一个station的值来赋初值
-        cw_dict["Re_theta"][n] = cw_dict["Re_theta"][n - 1] if n > 0 else 1e3
+        cw_dict["Re_theta"][n] = (
+            cw_dict["Re_theta"][n - 1] if n > 0 else 1e4
+        )  # 1E4初值对结果没有显著影响
         if n == 2:
             cw_dict["Re_theta"][n] = cw_dict["Re_theta"][0]
             # 不用n=1是因为此时还未求解2
@@ -168,12 +196,14 @@ def update_H_Cf(n, iter):
         cw_dict["H_i"][n] = cal_Hi(n)
         cw_dict["H"][n] = cal_H(n)
         # # =============
+        # # 应对alpha为0时，可能出现的H为负数情况。
         # if cw_dict["H"][n] <= 0 and n == 0:
         #     cw_dict["H"][n] = 0.3
         # # ----------------
         return iter
 
     if iter > 0:
+        # 基于iter-1计算的theta，计算Re_theta
         temp_Re_theta = cal_Re_theta(n)
 
         if (
@@ -192,6 +222,7 @@ def update_H_Cf(n, iter):
             cw_dict["H_i"][n] = cal_Hi(n)
             cw_dict["H"][n] = cal_H(n)
             # # ==============
+            # # 应对alpha为0时，可能出现的H为负数情况。
             # if cw_dict["H"][n] <= 0 and n == 0:
             #     cw_dict["H"][n] = 0.3
             # # ============
@@ -200,6 +231,13 @@ def update_H_Cf(n, iter):
 
 
 def n0(delta_a_star):
+    """
+    计算n=0点的theta，且已知theta' = 0
+
+    params:
+    ------------------
+    delta_a_star: 指定n=0处的位移厚度
+    """
     global cw_dict
 
     n = 0
@@ -214,19 +252,19 @@ def n0(delta_a_star):
     ) / (
         2 * delta_a_star
         + 2 * cw_dict["y"][0] / math.cos(math.radians(cw_dict["phi"][0].item()))
-    )
+    )  # 反解Eq.61
 
     W_0 = (
         1
         + 1 / (4 * R)
         - (14 * gama + 15) / (288 * R**2)
         + (2364 * gama**2 + 4149 * gama + 2241) / (82944 * R**3)
-    )
+    )  # Eq. 57
 
     beta = (2 / (gama + 1) * R) ** (0.5)
     dW_dx_0 = (beta / r_star) * (
         1 + 3 / (8 * R) - (64 * gama**2 + 117 * gama + 54) / (1154 * R**2)
-    )
+    )  # Eq. 58
 
     for iter in range(10000):
         iter = update_H_Cf(n, iter)  # 更新{Re_theta, Re_theta_i, C_fi, C_f, Hi, H}
@@ -234,19 +272,19 @@ def n0(delta_a_star):
             break
         cw_dict["theta"][0] = delta_star / cw_dict["H"][0]
 
-        # print(f"==============iter = {iter}=======================")
-        # # print(np.array(list(cw_dict.values()))[:, 0])
-        # for key, item in zip(cw_dict.keys(), np.asarray(list(cw_dict.values()))[:, 0]):
-        #     print(f"{key}: {item}")
     cw_dict["P"][0] = (2 + cw_dict["H"][0] - cw_dict["Ma"][0] ** 2) * dW_dx_0 / W_0
     cw_dict["Q"][0] = cw_dict["theta"][0] * cw_dict["P"][0]
     cw_dict["theta_deri"][0] = 0  # 人工指定
 
-    print(f"n={n}, theta = {cw_dict["theta"][n]}")
+    # print(f"n={n}, theta = {cw_dict["theta"][n]}")
 
 
 def n1n2():
-    # %%不直接求解n=1，而是通过将Eq.56中的theta_2和theta_2'替换为theta3和theta3'，从而先求解theta_3，在得到theta2
+    """
+    将theta_n1和theta'_n1用theta_n2和theta_n2替换，从而求解Eq.56，得到theta_n2
+    再计算得到theta_n1
+    """
+    # %%先求解theta_n2，在文章中是点3
     global cw_dict
 
     n = 2
@@ -284,10 +322,12 @@ def n1n2():
             cw_dict["C_f"][n] / 2 / math.cos(math.radians(cw_dict["phi"][n].item()))
         )
 
+        # Eq. 52-54
         Gn_2 = (2 * s - t) * (s + t) / 6 / s
         Gn_1 = (s + t) ** 3 / 6 / s / t
         Gn = (2 * t - s) * (s + t) / 6 / t
 
+        # 将Eq.56中的theta_n1替换为theta_n2得到的公式，求解theta_2
         cw_dict["theta"][n] = (
             cw_dict["theta"][n - 2]
             + Gn_2 * cw_dict["theta_deri"][n - 2]
@@ -313,8 +353,8 @@ def n1n2():
     cw_dict["H_i"][n] = cal_Hi(n)
     cw_dict["H"][n] = cal_H(n)
 
-    print(f"n={1}, theta = {cw_dict["theta"][1]}")
-    print(f"n={2}, theta = {cw_dict["theta"][2]}")
+    # print(f"n={1}, theta = {cw_dict["theta"][1]}")
+    # print(f"n={2}, theta = {cw_dict["theta"][2]}")
 
 
 def solve_momentum_eq():
@@ -357,7 +397,7 @@ def solve_momentum_eq():
         for iter in range(10000):
             iter = update_H_Cf(n, iter)  # 更新{Re_theta, Re_theta_i, C_fi, C_f, Hi, H}
             if iter == -1:
-                print(f"n={n}, theta = {cw_dict["theta"][n]}")
+                # print(f"n={n}, theta = {cw_dict["theta"][n]}")
                 break
 
             P_n1 = 2 - cw_dict["Ma"][n] ** 2 + cw_dict["H"][n]
@@ -415,8 +455,13 @@ def over_plot():
         linestyle="--",
         color="red",
     )
-    plt.axis("equal")
-    plt.ylim(0)
+    plt.ylim(0, 0.6)
+    plt.axis("scaled")
+    plt.text(
+        x=cw_dict["x"][0],
+        y=cw_dict["y"][-1] * 2,
+        s=f"The boundary correction at the exit is {cw_dict["boundary_correction"][-1]:.4f} m",
+    )
     plt.show()
 
 
