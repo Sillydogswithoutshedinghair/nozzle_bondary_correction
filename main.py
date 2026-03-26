@@ -451,7 +451,7 @@ def over_plot():
     plt.plot(cw_dict["x"], cw_dict["y"])
     plt.plot(
         cw_dict["x"],
-        cw_dict["y"] - cw_dict["boundary_correction"],
+        cw_dict["y"] + cw_dict["boundary_correction"],
         linestyle="--",
         color="red",
     )
